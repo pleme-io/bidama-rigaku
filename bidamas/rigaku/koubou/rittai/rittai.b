@@ -1,0 +1,1118 @@
+@moduledoc """
+rittai (立体) — solids: poses, triangle meshes built by extrusion and sweep, their validity, volume and centroid, and STL.
+
+A point is [x, y, z]. A mesh is [vertices, faces]: each face is [i, j, k],
+indices into the vertices, wound counter-clockwise seen from OUTSIDE, so
+every normal points out and the divergence theorem gives a positive volume.
+Solids are generated rather than carved: an extrusion of a kikagaku region
+(a sheet with holes, a tube's cross-section) or a sweep of a profile along
+a path (a bent wire), because the parts they are for (folded sheet, welded
+tube, bent wire) are made that way. There are no 3D boolean operations.
+
+Units are the caller's; the design pipeline uses millimetres throughout.
+Written for nupastel docs/plans/design-pipeline.md, step 4.
+
+    turn(square_points, [0, 1, 2], 1) #=> 1
+"""
+
+use("junjo", [:sort_by])
+
+use("kazu", %i[abs clamp max max_of min min_of near near_within sum])
+
+use(
+  "kikagaku",
+  %i[
+    ccw_polygon
+    circle_polygon
+    cross
+    distance_squared
+    pi
+    polygon_edges
+    px
+    py
+    rect_polygon
+    region
+    region_area
+    region_holes
+    region_outline
+    regular_polygon_area
+    segments_intersect
+    triangle_area
+  ]
+)
+
+use(
+  "retsu",
+  %i[
+    concat_lists
+    contains
+    drop_n
+    find_first
+    first
+    flat_map
+    index_of
+    indexes
+    is_empty
+    remove_at
+    rest
+    size
+    take_n
+  ]
+)
+
+use(
+  "suugaku/gyouretsu",
+  %i[
+    cross_product
+    dot
+    identity_matrix
+    is_orthogonal
+    is_zero_vector
+    madd
+    magnitude
+    matmul
+    mscale
+    mvmul
+    normalize
+    scale
+    transpose
+    vadd
+    vector_near
+    vsub
+  ]
+)
+
+legacy_names("0.1.1", "rt")
+
+legacy_names("0.1.2", [%w[index_edges kikagaku::polygon_edges]])
+
+# ── points and directions ────────────────────────────────────────────
+
+def x(p)
+  p[0]
+end
+
+def y(p)
+  p[1]
+end
+
+def z(p)
+  p[2]
+end
+
+@doc """
+lift: A 2-D point lifted onto the plane z.
+"""
+def lift(p, z)
+  [px(p), py(p), z]
+end
+
+# ── rotations and poses ──────────────────────────────────────────────
+# A rotation is a 3 x 3 matrix (a list of rows). A pose is [rotation,
+# translation]: it maps a point p to R p + t.
+
+def rot_x(theta)
+  [[1, 0, 0], [0, cos(theta), -sin(theta)], [0, sin(theta), cos(theta)]]
+end
+
+def rot_y(theta)
+  [[cos(theta), 0, sin(theta)], [0, 1, 0], [-sin(theta), 0, cos(theta)]]
+end
+
+def rot_z(theta)
+  [[cos(theta), -sin(theta), 0], [sin(theta), cos(theta), 0], [0, 0, 1]]
+end
+
+@doc """
+rot_axis: Rotation by theta about a unit axis (Rodrigues' formula).
+"""
+def rot_axis(axis, theta)
+  k = normalize(axis)
+  kx = x(k)
+  ky = y(k)
+  kz = z(k)
+  kmat = [[0, -kz, ky], [kz, 0, -kx], [-ky, kx, 0]]
+  madd(
+    madd(identity_matrix(3), mscale(sin(theta), kmat)),
+    mscale(1 - cos(theta), matmul(kmat, kmat))
+  )
+end
+
+@doc """
+rot_between: The rotation taking unit direction a onto unit direction b by the shortest
+turn. Opposite directions have no unique shortest turn; a half-turn about
+any axis perpendicular to a is chosen.
+"""
+def rot_between(a, b)
+  ua = normalize(a)
+  ub = normalize(b)
+  c = dot(ua, ub)
+  if c > 0.999999999999
+    identity_matrix(3)
+  elsif c < -0.999999999999
+    rot_axis(perpendicular(ua), pi)
+  else
+    rot_axis(cross_product(ua, ub), acos(clamp(c, -1, 1)))
+  end
+end
+
+@doc """
+perpendicular: Some unit vector perpendicular to v.
+"""
+def perpendicular(v)
+  trial = if abs(x(v)) < 0.9
+    [1, 0, 0]
+  else
+    [0, 1, 0]
+  end
+  normalize(cross_product(v, trial))
+end
+
+def pose(rotation, translation)
+  [rotation, translation]
+end
+
+def pose_rotation(p)
+  p[0]
+end
+
+def pose_translation(p)
+  p[1]
+end
+
+def identity_pose()
+  pose(identity_matrix(3), [0, 0, 0])
+end
+
+def translation(t)
+  pose(identity_matrix(3), t)
+end
+
+# waive B0013: `apply` is a builtin rittai also uses, so the prefix stays; rittai::apply names it too
+def rt_apply(pose, p)
+  vadd(mvmul(pose_rotation(pose), p), pose_translation(pose))
+end
+
+# waive B0013: `compose` is a builtin rittai also uses, so the prefix stays; rittai::compose names it too
+@doc """
+rt_compose: First b, then a: rt_apply(rt_compose(a, b), p) == rt_apply(a, rt_apply(b, p)).
+"""
+def rt_compose(a, b)
+  pose(
+    matmul(pose_rotation(a), pose_rotation(b)),
+    rt_apply(a, pose_translation(b))
+  )
+end
+
+@doc """
+inverse: The inverse pose. A rotation's inverse is its transpose.
+"""
+def inverse(pose)
+  rt = transpose(pose_rotation(pose))
+  rittai::pose(rt, scale(-1, mvmul(rt, pose_translation(pose))))
+end
+
+@doc """
+pose_along: The pose that stands a part built along +z on the segment from a to b: its
+origin at a, its +z along b - a. This is how a tube member is placed.
+"""
+def pose_along(a, b)
+  pose(rot_between([0, 0, 1], vsub(b, a)), a)
+end
+
+# ── meshes ───────────────────────────────────────────────────────────
+
+@doc """
+mesh: solid made of triangles.
+"""
+def mesh(vertices, faces)
+  [vertices, faces]
+end
+
+def vertices(m)
+  m[0]
+end
+
+def faces(m)
+  m[1]
+end
+
+def empty_mesh()
+  mesh([], [])
+end
+
+@doc """
+merge: Several meshes as one, the later faces re-indexed past the earlier vertices.
+"""
+def merge(meshes)
+  reduce(merge_two, empty_mesh, meshes)
+end
+
+def merge_two(a, b)
+  off = size(vertices(a))
+  mesh(
+    concat_lists(vertices(a), vertices(b)),
+    concat_lists(faces(a), map((f) -> map((i) -> i + off, f), faces(b)))
+  )
+end
+
+@doc """
+transform: mesh moved and turned by a pose.
+"""
+def transform(pose, m)
+  mesh(map((p) -> rt_apply(pose, p), vertices(m)), faces(m))
+end
+
+def translate(m, d)
+  transform(translation(d), m)
+end
+
+def face_points(m, f)
+  map((i) -> vertices(m)[i], f)
+end
+
+@doc """
+face_normal: The face's outward normal, unit length; zero for a degenerate face.
+"""
+def face_normal(m, f)
+  pts = face_points(m, f)
+  n = cross_product(vsub(pts[1], pts[0]), vsub(pts[2], pts[0]))
+  if is_zero_vector(n)
+    [0, 0, 0]
+  else
+    normalize(n)
+  end
+end
+
+def face_area(m, f)
+  pts = face_points(m, f)
+  magnitude(cross_product(vsub(pts[1], pts[0]), vsub(pts[2], pts[0]))) / 2
+end
+
+@doc """
+surface_area: total area of all faces.
+"""
+def surface_area(m)
+  sum(map((f) -> face_area(m, f), faces(m)))
+end
+
+# ── volume and centroid ──────────────────────────────────────────────
+# Each face and the origin make a tetrahedron of signed volume
+# (a . (b x c)) / 6; over a closed, outward-wound mesh they sum to the
+# solid's volume, and their volume-weighted centroids to its centroid.
+
+def tet_volume(pts)
+  dot(pts[0], cross_product(pts[1], pts[2])) / 6
+end
+
+@doc """
+volume: enclosed volume of a closed mesh.
+"""
+def volume(m)
+  sum(map((f) -> tet_volume(face_points(m, f)), faces(m)))
+end
+
+@doc """
+centroid: centre of mass of a mesh.
+"""
+def centroid(m)
+  v = volume(m)
+  moment = reduce(
+    (acc, f) -> centroid_term(acc, face_points(m, f)),
+    [0, 0, 0],
+    faces(m)
+  )
+  scale(1.0 / v, moment)
+end
+
+def centroid_term(acc, pts)
+  # A tetrahedron's centroid is the mean of its four corners, one of them the
+  # origin: (a + b + c) / 4.
+  vadd(acc, scale(tet_volume(pts) / 4, vadd(vadd(pts[0], pts[1]), pts[2])))
+end
+
+@doc """
+mass_g: Mass from volume and density. With lengths in mm and density in g/cm^3
+(316L: 7.99), mm^3 * g/cm^3 / 1000 is grams.
+"""
+def mass_g(m, density_g_cm3)
+  volume(m) * density_g_cm3 / 1000
+end
+
+@doc """
+bounds: smallest axis-aligned box around a mesh.
+"""
+def bounds(m)
+  vs = vertices(m)
+  [
+    [min_of(map(x, vs)), min_of(map(y, vs)), min_of(map(z, vs))],
+    [max_of(map(x, vs)), max_of(map(y, vs)), max_of(map(z, vs))]
+  ]
+end
+
+# ── validity ─────────────────────────────────────────────────────────
+# A mesh can be written to a file and still not be a solid. These are the
+# ways it fails, as [kind, why]. Empty means closed, consistently wound
+# outward, and without degenerate faces.
+
+def edge_key(a, b)
+  "#{to_s(a)}>#{to_s(b)}"
+end
+
+def directed_edges(m)
+  flat_map(
+    faces(m),
+    (f) -> [edge_key(f[0], f[1]), edge_key(f[1], f[2]), edge_key(f[2], f[0])]
+  )
+end
+
+def mesh_refusals(m)
+  n = size(vertices(m))
+  faces = rittai::faces(m)
+  if is_empty(faces)
+    [[:rittai_mesh, "the mesh has no faces"]]
+  else
+    bad_index = filter((f) -> some((i) -> i < 0 or i >= n, f) == true, faces)
+    if is_empty(bad_index) == false
+      [
+        [
+          :rittai_mesh,
+          "#{to_s(size(bad_index))} face(s) name a vertex that does not exist"
+        ]
+      ]
+    else
+      # Judged by POSITION, as every reader of an STL judges it: two parts
+      # that touch share no vertex indices, so by index each looks closed,
+      # while by position their touching faces sit inside one another.
+      closed_refusals(weld(m))
+    end
+  end
+end
+
+def closed_refusals(m)
+  degenerate = size(filter((f) -> face_area(m, f) <= 0.0000000001, faces(m)))
+  directed = directed_edges(m)
+  seen = count_keys(directed)
+  present = key_set(seen)
+  doubled = size(filter((kv) -> kv[1] > 1, seen))
+  unmatched = size(filter((kv) -> get(present, reverse_key(kv[0])).nil?, seen))
+  crowded = size(
+    filter((kv) -> kv[1] > 2, count_keys(map(undirected_key, directed)))
+  )
+  out = concat_lists(
+    if crowded > 0
+      [
+        [
+          :rittai_mesh,
+          "#{to_s(crowded)} edge(s) are shared by more than two faces: not one solid (parts touching without being fused)"
+        ]
+      ]
+    else
+      []
+    end,
+    concat_lists(
+      if degenerate > 0
+        [[:rittai_mesh, "#{to_s(degenerate)} degenerate face(s)"]]
+      else
+        []
+      end,
+      concat_lists(
+        if doubled > 0
+          [
+            [
+              :rittai_mesh,
+              "#{to_s(doubled)} edge(s) run the same way twice: faces wound inconsistently"
+            ]
+          ]
+        else
+          []
+        end,
+        if unmatched > 0
+          [
+            [
+              :rittai_mesh,
+              "#{to_s(unmatched)} edge(s) have no face on the other side: the mesh is open"
+            ]
+          ]
+        else
+          []
+        end
+      )
+    )
+  )
+  if is_empty(out) and volume(m) <= 0
+    [[:rittai_mesh, "the volume is not positive: the faces are wound inward"]]
+  else
+    out
+  end
+end
+
+def reverse_key(k)
+  parts = split(k, ">")
+  "#{parts[1]}>#{parts[0]}"
+end
+
+@doc """
+undirected_key: The edge regardless of direction: its two indices, lower first.
+"""
+def undirected_key(k)
+  parts = map((s) -> to_int(s), split(k, ">"))
+  "#{to_s(min(parts[0], parts[1]))}-#{to_s(max(parts[0], parts[1]))}"
+end
+
+# ── welding and fusing ───────────────────────────────────────────────
+
+@doc """
+position_key: A position as a key, to a millionth of the unit: two vertices closer than
+that are one vertex.
+"""
+def position_key(p)
+  "#{to_s(round(x(p) * 1_000_000))},#{to_s(round(y(p) * 1_000_000))},#{to_s(round(z(p) * 1_000_000))}"
+end
+
+@doc """
+weld: Vertices at the same position merged into one, faces re-indexed. An
+assembly of parts that touch has a duplicate vertex at every seam; welded,
+a seam either closes (the parts were fused properly) or shows as an edge
+shared by more than two faces (they only touch).
+"""
+def weld(m)
+  vs = vertices(m)
+  fin = reduce(weld_step, {index: {}, kept: [], count: 0, remap: []}, vs)
+  remap = reverse(fin[:remap])
+  mesh(reverse(fin[:kept]), map((f) -> map((i) -> remap[i], f), faces(m)))
+end
+
+def weld_step(acc, p)
+  k = position_key(p)
+  at = get(acc[:index], k)
+  if at.nil?
+    n = acc[:count]
+    {
+      index: assoc(acc[:index], k, n),
+      kept: concat_lists([p], acc[:kept]),
+      count: n + 1,
+      remap: concat_lists([n], acc[:remap])
+    }
+  else
+    {
+      index: acc[:index],
+      kept: acc[:kept],
+      count: acc[:count],
+      remap: concat_lists([at], acc[:remap])
+    }
+  end
+end
+
+@doc """
+drop_faces: The mesh without the faces at the given positions in its face list.
+"""
+def drop_faces(m, drop)
+  mesh(
+    vertices(m),
+    map(
+      (i) -> faces(m)[i],
+      filter((i) -> contains(drop, i) == false, indexes(faces(m)))
+    )
+  )
+end
+
+@doc """
+extrude_wall_faces: rt_extrude's face order is a contract: the side walls come first, two
+triangles per loop edge, loop by loop (the outline, then each hole) and
+edge by edge from each loop's first point; then the top cap, then the
+bottom. These are the two wall faces of edge e of loop l, the edge from
+point e to point e + 1, for a caller fusing a part onto that wall.
+"""
+def extrude_wall_faces(r, l, e)
+  sizes = concat_lists(
+    [size(region_outline(r))],
+    map((h) -> size(h), region_holes(r))
+  )
+  before = sum(take_n(sizes, l))
+  [2 * (before + e), 2 * (before + e) + 1]
+end
+
+@doc """
+count_keys: [key, count] for each distinct key.
+"""
+def count_keys(keys)
+  table = reduce((acc, k) -> assoc(acc, k, count_of(acc, k) + 1), {}, keys)
+  map((k) -> [k, get(table, k)], rt_distinct(keys, table))
+end
+
+def count_of(table, k)
+  v = get(table, k)
+  if v.nil?
+    0
+  else
+    v
+  end
+end
+
+# waive B0013: `distinct` is a builtin rittai also uses, so the prefix stays; rittai::distinct names it too
+def rt_distinct(keys, _table)
+  reverse(reduce(distinct_step, {seen: {}, out: []}, keys)[:out])
+end
+
+def distinct_step(acc, k)
+  if get(acc[:seen], k).nil?
+    {seen: assoc(acc[:seen], k, true), out: concat_lists([k], acc[:out])}
+  else
+    acc
+  end
+end
+
+def key_set(pairs)
+  reduce((acc, kv) -> assoc(acc, kv[0], true), {}, pairs)
+end
+
+# ── triangulating a polygon with holes ───────────────────────────────
+# Ear clipping. Holes are first joined to the outline by a bridge to a
+# vertex the hole can see, making one polygon that doubles back along each
+# bridge; that polygon is then clipped one convex ear at a time. The result
+# is triangles as index triples into the region's points: the outline's
+# first, then each hole's, in order.
+
+@doc """
+region_points: All of a region's points, outline first, and each loop's index range.
+"""
+def region_points(r)
+  concat_lists(region_outline(r), flat_map(region_holes(r), (h) -> h))
+end
+
+def region_loops(r)
+  sizes = concat_lists(
+    [size(region_outline(r))],
+    map((h) -> size(h), region_holes(r))
+  )
+  starts = reverse(
+    get(
+      reduce(
+        fn(acc, s)
+          {next: acc[:next] + s, out: concat_lists([acc[:next]], acc[:out])}
+        end,
+        {next: 0, out: []},
+        sizes
+      ),
+      :out
+    )
+  )
+  map((i) -> range(starts[i], starts[i] + sizes[i]), indexes(sizes))
+end
+
+@doc """
+triangulate: Triangles for a region, or a refusal. Each triangle is counter-clockwise.
+"""
+def triangulate(r)
+  pts = region_points(r)
+  loops = region_loops(r)
+  holes = sort_by((l) -> -max_of(map((i) -> px(pts[i]), l)), rest(loops))
+  merged = reduce((poly, h) -> bridge(pts, poly, h, holes), first(loops), holes)
+  ear_clip(pts, merged)
+end
+
+@doc """
+bridge: Join hole h into polygon poly (both lists of point indices): from the
+hole's rightmost vertex, a bridge to the nearest polygon vertex the
+segment reaches without crossing any edge.
+"""
+def bridge(pts, poly, h, holes)
+  m = rightmost(pts, h)
+  cands = sort_by((i) -> distance_squared(pts[i], pts[m]), poly)
+  edges = concat_lists(polygon_edges(poly), flat_map(holes, polygon_edges))
+  p = find_first((i) -> visible(pts, m, i, edges), cands)
+  at = index_of(poly, p)
+  k = index_of(h, m)
+  around = concat_lists(drop_n(h, k), take_n(h, k))
+  concat_lists(
+    take_n(poly, at + 1),
+    concat_lists(around, concat_lists([m, p], drop_n(poly, at + 1)))
+  )
+end
+
+def rightmost(pts, loop)
+  reduce(
+    fn(best, i)
+      if px(pts[i]) > px(pts[best])
+        i
+      else
+        best
+      end
+    end,
+    first(loop),
+    loop
+  )
+end
+
+@doc """
+visible: The segment from vertex m to vertex p crosses no edge except at its ends.
+"""
+def visible(pts, m, p, edges)
+  a = pts[m]
+  b = pts[p]
+  some((e) -> blocks(pts, e, m, p, a, b), edges) != true
+end
+
+def blocks(pts, e, m, p, a, b)
+  i = e[0]
+  j = e[1]
+  if i == m or j == m or i == p or j == p
+    false
+  else
+    segments_intersect(a, b, pts[i], pts[j])
+  end
+end
+
+def ear_clip(pts, poly)
+  n = size(poly)
+  fin = reduce(
+    (acc, _step) -> clip_step(pts, acc),
+    {poly:, tris: [], stuck: false},
+    range(0, n)
+  )
+  if fin[:stuck] or size(fin[:poly]) > 0
+    {
+      triangles: reverse(fin[:tris]),
+      refusals: [
+        [
+          :rittai_triangulation,
+          "no ear left with #{to_s(size(fin[:poly]))} vertices remaining; the region is not simple"
+        ]
+      ]
+    }
+  else
+    {triangles: reverse(fin[:tris]), refusals: []}
+  end
+end
+
+def clip_step(pts, acc)
+  poly = acc[:poly]
+  if acc[:stuck] or size(poly) == 0
+    acc
+  elsif size(poly) == 3
+    {poly: [], tris: concat_lists([poly], acc[:tris]), stuck: false}
+  else
+    ears = filter((k) -> is_ear(pts, poly, k), indexes(poly))
+    if is_empty(ears)
+      flat = filter((k) -> turn(pts, poly, k) == 0, indexes(poly))
+      if is_empty(flat)
+        {poly:, tris: acc[:tris], stuck: true}
+      else
+        {poly: remove_at(poly, first(flat)), tris: acc[:tris], stuck: false}
+      end
+    else
+      k = first(ears)
+      n = size(poly)
+      tri = [poly[(k + n - 1) % n], poly[k], poly[(k + 1) % n]]
+      {
+        poly: remove_at(poly, k),
+        tris: concat_lists([tri], acc[:tris]),
+        stuck: false
+      }
+    end
+  end
+end
+
+@doc """
+turn: The sign of the turn at position k: 1 convex (counter-clockwise), -1
+reflex, 0 straight.
+
+    turn(square_points, [0, 1, 2], 1) #=> 1
+"""
+def turn(pts, poly, k)
+  n = size(poly)
+  c = cross(pts[poly[(k + n - 1) % n]], pts[poly[k]], pts[poly[(k + 1) % n]])
+  if c > 0.0000000001
+    1
+  elsif c < -0.0000000001
+    -1
+  else
+    0
+  end
+end
+
+@doc """
+is_ear: A convex corner whose triangle holds no other vertex of the polygon. A
+vertex at the same place as a corner (the two ends of a bridge) does not
+count as inside.
+"""
+def is_ear(pts, poly, k)
+  if turn(pts, poly, k) != 1
+    false
+  else
+    n = size(poly)
+    a = pts[poly[(k + n - 1) % n]]
+    b = pts[poly[k]]
+    c = pts[poly[(k + 1) % n]]
+    some((j) -> blocks_ear(pts, poly, j, a, b, c), indexes(poly)) != true
+  end
+end
+
+def blocks_ear(pts, poly, j, a, b, c)
+  q = pts[poly[j]]
+  if near(distance_squared(q, a), 0) or
+      near(distance_squared(q, b), 0) or
+      near(distance_squared(q, c), 0)
+    false
+  else
+    cross(a, b, q) >= 0 and cross(b, c, q) >= 0 and cross(c, a, q) >= 0
+  end
+end
+
+# ── solids ───────────────────────────────────────────────────────────
+
+@doc """
+extrude: A kikagaku region extruded from z = 0 to z = h: a sheet part's blank, or a
+tube's cross-section run out to its length.
+"""
+def extrude(r, h)
+  pts = region_points(r)
+  n = size(pts)
+  tri = triangulate(r)
+  if is_empty(tri[:refusals]) == false
+    raise(:rittai_triangulation, why_of(tri[:refusals]))
+  end
+  bottom = map((p) -> lift(p, 0), pts)
+  top = map((p) -> lift(p, h), pts)
+  sides = flat_map(region_loops(r), (l) -> loop_sides(l, n))
+  caps_top = map((t) -> map((i) -> i + n, t), tri[:triangles])
+  caps_bottom = map((t) -> reverse(t), tri[:triangles])
+  mesh(
+    concat_lists(bottom, top),
+    concat_lists(sides, concat_lists(caps_top, caps_bottom))
+  )
+end
+
+def why_of(refusals)
+  join(map((r) -> r[1], refusals), "; ")
+end
+
+@doc """
+loop_sides: The two side triangles of each edge a -> b of a loop, facing out: bottom
+a, bottom b, top b, then bottom a, top b, top a.
+"""
+def loop_sides(loop, n)
+  flat_map(
+    polygon_edges(loop),
+    (e) -> [[e[0], e[1], e[1] + n], [e[0], e[1] + n, e[0] + n]]
+  )
+end
+
+def box(w, d, h)
+  extrude(region(rect_polygon(0, 0, w, d), []), h)
+end
+
+@doc """
+cylinder: A cylinder of radius r and height h along +z, its base a regular n-gon.
+"""
+def cylinder(r, h, n)
+  extrude(region(circle_polygon([0, 0], r, n), []), h)
+end
+
+@doc """
+sweep: A profile (a simple polygon, counter-clockwise in its own xy plane) swept
+along a path of 3-D points, with a mitred joint at each interior point: the
+shape of a bent wire or rod. The profile's x axis starts along a normal to
+the first segment and is carried round each bend without twisting.
+"""
+def sweep(profile, path)
+  prof = ccw_polygon(profile)
+  frames = sweep_frames(path)
+  rings = map((i) -> ring(prof, path, frames, i), indexes(path))
+  np = size(prof)
+  verts = flat_map(rings, (ring) -> ring)
+  walls = flat_map(range(0, size(path) - 1), (s) -> ring_walls(s, np))
+  tri = triangulate(region(prof, []))
+  last_base = (size(path) - 1) * np
+  start_cap = map((t) -> reverse(t), tri[:triangles])
+  end_cap = map((t) -> map((i) -> i + last_base, t), tri[:triangles])
+  mesh(verts, concat_lists(walls, concat_lists(start_cap, end_cap)))
+end
+
+def segment_dir(path, i)
+  normalize(vsub(path[i + 1], path[i]))
+end
+
+@doc """
+sweep_frames: [normal, binormal] for each segment, carried by the rotation between
+consecutive segment directions (parallel transport).
+"""
+def sweep_frames(path)
+  t0 = segment_dir(path, 0)
+  n0 = perpendicular(t0)
+  first_frame = [n0, cross_product(t0, n0)]
+  reverse(
+    reduce(
+      (acc, i) -> transport(path, acc, i),
+      [first_frame],
+      range(1, size(path) - 1)
+    )
+  )
+end
+
+def transport(path, acc, i)
+  prev = first(acc)
+  r = rot_between(segment_dir(path, i - 1), segment_dir(path, i))
+  concat_lists([[mvmul(r, prev[0]), mvmul(r, prev[1])]], acc)
+end
+
+@doc """
+ring: The profile placed at path point i: on the end planes at the two ends,
+and on the mitre plane (normal along the sum of the two directions) at a
+joint, reached along the incoming direction.
+"""
+def ring(prof, path, frames, i)
+  last_seg = size(path) - 2
+  seg = min(i, last_seg)
+  frame = frames[seg]
+  if i == 0 or i == size(path) - 1
+    map(
+      fn(q)
+        vadd(path[i], vadd(scale(px(q), frame[0]), scale(py(q), frame[1])))
+      end,
+      prof
+    )
+  else
+    tin = segment_dir(path, i - 1)
+    tout = segment_dir(path, i)
+    mitre = normalize(vadd(tin, tout))
+    fin = frames[i - 1]
+    map(
+      fn(q)
+        onto_mitre(
+          path[i],
+          vadd(scale(px(q), fin[0]), scale(py(q), fin[1])),
+          tin,
+          mitre
+        )
+      end,
+      prof
+    )
+  end
+end
+
+def onto_mitre(joint, offset, tin, mitre)
+  vadd(joint, vsub(offset, scale(dot(offset, mitre) / dot(tin, mitre), tin)))
+end
+
+def ring_walls(s, np)
+  a0 = s * np
+  b0 = (s + 1) * np
+  flat_map(
+    range(0, np),
+    fn(k)
+      [
+        [a0 + k, a0 + (k + 1) % np, b0 + (k + 1) % np],
+        [a0 + k, b0 + (k + 1) % np, b0 + k]
+      ]
+    end
+  )
+end
+
+# ── STL ──────────────────────────────────────────────────────────────
+
+def point_text(p)
+  "#{to_s(x(p))} #{to_s(y(p))} #{to_s(z(p))}"
+end
+
+@doc """
+stl: ASCII STL: one facet per face, its normal included.
+"""
+def stl(m, name)
+  facets = map((f) -> stl_facet(m, f), faces(m))
+  unlines(["solid #{name}", "#{join(facets, "")}endsolid #{name}"])
+end
+
+def stl_facet(m, f)
+  pts = face_points(m, f)
+  unlines(
+    [
+      "facet normal #{point_text(face_normal(m, f))}",
+      " outer loop",
+      "  vertex #{point_text(pts[0])}",
+      "  vertex #{point_text(pts[1])}",
+      "  vertex #{point_text(pts[2])}",
+      " endloop",
+      "endfacet"
+    ]
+  )
+end
+
+# ── tests ────────────────────────────────────────────────────────────
+
+test "a box: closed, outward, its volume, surface and centroid"
+  b = box(20, 30, 40)
+  assert is_empty(mesh_refusals(b)) == true
+  assert near(volume(b), 24000) == true
+  assert near(surface_area(b), 2 * (20 * 30 + 20 * 40 + 30 * 40)) == true
+  assert vector_near(centroid(b), [10, 15, 20]) == true
+  assert size(faces(b)) == 12
+end
+
+test "a drilled plate extrudes to its region's area times its thickness"
+  hole = circle_polygon([25, 25], 10, 32)
+  plate = region(
+    rect_polygon(0, 0, 100, 50),
+    [hole, circle_polygon([75, 25], 8, 24)]
+  )
+  m = extrude(plate, 1.5)
+  assert is_empty(mesh_refusals(m)) == true
+  # Independently checkable: region_area uses the shoelace; the volume is
+  # summed from tetrahedra over the triangulation and the walls.
+  assert near_within(volume(m), region_area(plate) * 1.5, 0.0001) == true
+  # Ear clipping gives n + 2h - 2 triangles for n points and h holes.
+  tri = triangulate(plate)
+  assert size(tri[:triangles]) == 4 + 32 + 24 + 2 * 2 - 2
+  # The triangles tile the region exactly.
+  pts = region_points(plate)
+  assert near_within(
+    sum(
+      map(
+        (t) -> triangle_area(pts[t[0]], pts[t[1]], pts[t[2]]),
+        tri[:triangles]
+      )
+    ),
+    region_area(plate),
+    0.0001
+  ) == true
+end
+
+test "a non-convex outline triangulates and extrudes"
+  ell = region([[0, 0], [30, 0], [30, 10], [10, 10], [10, 30], [0, 30]], [])
+  m = extrude(ell, 2)
+  assert is_empty(mesh_refusals(m)) == true
+  assert near(volume(m), 500 * 2) == true
+end
+
+test "a cylinder's volume is its regular polygon's area times its height"
+  c = cylinder(5, 10, 48)
+  assert is_empty(mesh_refusals(c)) == true
+  assert near(volume(c), regular_polygon_area(5, 48) * 10) == true
+  assert vector_near(centroid(c), [0, 0, 5]) == true
+end
+
+test "poses: rotation, composition, inverse, and standing a part on a segment"
+  q = [1, 2, 3]
+  p = pose(rot_z(pi / 2), [10, 0, 0])
+  assert vector_near(rt_apply(p, [1, 0, 0]), [10, 1, 0]) == true
+  assert vector_near(rt_apply(inverse(p), rt_apply(p, q)), q) == true
+  assert vector_near(rt_apply(rt_compose(p, inverse(p)), q), q) == true
+  assert vector_near(
+    mvmul(rot_axis([0, 0, 1], pi / 2), [1, 0, 0]),
+    [0, 1, 0]
+  ) == true
+  assert is_orthogonal(rot_axis([1, 2, 3], 0.7)) == true
+  along = pose_along([0, 0, 0], [0, 100, 0])
+  assert vector_near(rt_apply(along, [0, 0, 100]), [0, 100, 0]) == true
+  assert vector_near(
+    mvmul(rot_between([0, 0, 1], [0, 0, -1]), [0, 0, 1]),
+    [0, 0, -1]
+  ) == true
+  # A transformed solid keeps its volume and moves its centroid.
+  b = transform(p, box(2, 2, 2))
+  assert near(volume(b), 8) == true
+  assert vector_near(centroid(b), rt_apply(p, [1, 1, 1])) == true
+end
+
+test "a swept wire: straight, then mitred round a corner"
+  sq = rect_polygon(-1, -1, 2, 2)
+  straight = sweep(sq, [[0, 0, 0], [0, 0, 50]])
+  assert is_empty(mesh_refusals(straight)) == true
+  assert near(volume(straight), 4 * 50) == true
+  # Round a right angle with a mitred joint, the volume is the profile area
+  # times the centreline length: the two wedges of the mitre cancel.
+  ell = sweep(
+    circle_polygon([0, 0], 1, 16),
+    [[0, 0, 0], [0, 0, 40], [30, 0, 40]]
+  )
+  assert is_empty(mesh_refusals(ell)) == true
+  assert near_within(volume(ell), regular_polygon_area(1, 16) * 70, 0.000001) ==
+    true
+end
+
+test "broken meshes are refused, each for its own reason"
+  b = box(1, 1, 1)
+  # The controls: a face removed (open), one face flipped (inconsistent),
+  # every face flipped (inward), an index out of range, and no faces at all.
+  open = mesh(vertices(b), rest(faces(b)))
+  assert size(mesh_refusals(open)) >= 1
+  flipped = mesh(
+    vertices(b),
+    concat_lists([reverse(first(faces(b)))], rest(faces(b)))
+  )
+  assert size(mesh_refusals(flipped)) >= 1
+  inward = mesh(vertices(b), map((f) -> reverse(f), faces(b)))
+  assert map((r) -> r[1], mesh_refusals(inward)) ==
+    ["the volume is not positive: the faces are wound inward"]
+  assert size(mesh_refusals(mesh(vertices(b), [[0, 1, 99]]))) == 1
+  assert size(mesh_refusals(empty_mesh)) == 1
+end
+
+test "parts that only touch are refused; fused, they are one solid"
+  # Two unit boxes side by side. Merged, each is closed by its own indices,
+  # and the check still refuses them: by position, the shared face at x = 1
+  # is inside the solid. This is how a folded sheet part first failed a
+  # second reader (trimesh) while passing an index-only check.
+  r = region(rect_polygon(0, 0, 1, 1), [])
+  a = extrude(r, 1)
+  b = translate(extrude(r, 1), [1, 0, 0])
+  touching = merge([a, b])
+  assert is_empty(mesh_refusals(touching)) == false
+  # Fused: drop a's east wall (edge 1) and b's west wall (edge 3), then weld.
+  fused = weld(
+    merge(
+      [
+        drop_faces(a, extrude_wall_faces(r, 0, 1)),
+        drop_faces(b, extrude_wall_faces(r, 0, 3))
+      ]
+    )
+  )
+  assert is_empty(mesh_refusals(fused)) == true
+  assert near(volume(fused), 2) == true
+  # Welding merges only what coincides: a box welded is the same box.
+  assert size(vertices(weld(a))) == 8
+end
+
+test "STL: one facet per face, with outward normals"
+  s = stl(box(1, 1, 1), "cube")
+  assert starts_with?(s, unlines(["solid cube"])) == true
+  assert ends_with?(s, unlines(["endsolid cube"])) == true
+  assert size(
+    filter((l) -> starts_with?(l, "facet normal"), split(s, line_break))
+  ) == 12
+end
+
+def square_points()
+  [[0, 0], [1, 0], [1, 1], [0, 1]]
+end
+
+test "turn is 1 at every corner of a counter-clockwise square, wrapping at both ends"
+  assert map((k) -> turn(square_points, [0, 1, 2, 3], k), range(0, 4)) ==
+    [1, 1, 1, 1]
+  assert turn(square_points, [1, 2, 3, 0], 0) == 1
+end
+
+test "turn is -1 at every corner of a clockwise square"
+  assert map((k) -> turn(square_points, [3, 2, 1, 0], k), range(0, 4)) ==
+    [-1, -1, -1, -1]
+end
+
+test "turn is -1 at a reflex corner and 1 at the rest of an L"
+  pts = [[0, 0], [2, 0], [2, 2], [1, 2], [1, 1], [0, 1]]
+  assert map((k) -> turn(pts, [0, 1, 2, 3, 4, 5], k), range(0, 6)) ==
+    [1, 1, 1, 1, -1, 1]
+end
+
+test "turn is 0 on a straight run and within the tolerance of one, and not beyond it"
+  assert turn([[0, 0], [1, 0], [2, 0]], [0, 1, 2], 1) == 0
+  assert turn([[0, 0], [1, 0], [2, 0.00000000001]], [0, 1, 2], 1) == 0
+  assert turn([[0, 0], [1, 0], [2, 0.001]], [0, 1, 2], 1) == 1
+  assert turn([[0, 0], [1, 0], [2, -0.001]], [0, 1, 2], 1) == -1
+  assert turn([[0, 0], [0, 0], [0, 0]], [0, 1, 2], 1) == 0
+end
+
+test "turn reads the polygon's own order, not the point list's"
+  assert turn(square_points, [0, 2, 1], 1) == -1
+  assert turn(square_points, [0, 1, 2], 1) == 1
+end

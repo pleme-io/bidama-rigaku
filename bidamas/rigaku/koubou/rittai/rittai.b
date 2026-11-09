@@ -21,7 +21,26 @@ use("junjo", [:sort_by])
 use("kazu", %i[abs clamp max max_of min min_of near near_within sum])
 
 use(
-  "koubou/kikagaku",
+  "retsu",
+  %i[
+    concat_lists
+    contains
+    drop_n
+    find_first
+    first
+    flat_map
+    index_of
+    indexes
+    is_empty
+    remove_at
+    rest
+    size
+    take_n
+  ]
+)
+
+use(
+  "rigaku/koubou/kikagaku",
   %i[
     ccw_polygon
     circle_polygon
@@ -39,25 +58,6 @@ use(
     regular_polygon_area
     segments_intersect
     triangle_area
-  ]
-)
-
-use(
-  "retsu",
-  %i[
-    concat_lists
-    contains
-    drop_n
-    find_first
-    first
-    flat_map
-    index_of
-    indexes
-    is_empty
-    remove_at
-    rest
-    size
-    take_n
   ]
 )
 
@@ -85,7 +85,7 @@ use(
 
 legacy_names("0.1.1", "rt")
 
-legacy_names("0.1.2", [%w[index_edges koubou::kikagaku::polygon_edges]])
+legacy_names("0.1.2", [%w[index_edges rigaku::koubou::kikagaku::polygon_edges]])
 
 # ── points and directions ────────────────────────────────────────────
 
@@ -189,12 +189,12 @@ def translation(t)
   pose(identity_matrix(3), t)
 end
 
-# waive B0013: `apply` is a builtin rittai also uses, so the prefix stays; koubou::rittai::apply names it too
+# waive B0013: `apply` is a builtin rittai also uses, so the prefix stays; rigaku::koubou::rittai::apply names it too
 def rt_apply(pose, p)
   vadd(mvmul(pose_rotation(pose), p), pose_translation(pose))
 end
 
-# waive B0013: `compose` is a builtin rittai also uses, so the prefix stays; koubou::rittai::compose names it too
+# waive B0013: `compose` is a builtin rittai also uses, so the prefix stays; rigaku::koubou::rittai::compose names it too
 @doc """
 rt_compose: First b, then a: rt_apply(rt_compose(a, b), p) == rt_apply(a, rt_apply(b, p)).
 """
@@ -210,7 +210,7 @@ inverse: The inverse pose. A rotation's inverse is its transpose.
 """
 def inverse(pose)
   rt = transpose(pose_rotation(pose))
-  koubou::rittai::pose(rt, scale(-1, mvmul(rt, pose_translation(pose))))
+  rigaku::koubou::rittai::pose(rt, scale(-1, mvmul(rt, pose_translation(pose))))
 end
 
 @doc """
@@ -369,7 +369,7 @@ end
 
 def mesh_refusals(m)
   n = size(vertices(m))
-  faces = koubou::rittai::faces(m)
+  faces = rigaku::koubou::rittai::faces(m)
   if is_empty(faces)
     [[:rittai_mesh, "the mesh has no faces"]]
   else
@@ -546,7 +546,7 @@ def count_of(table, k)
   get_or(table, k, 0)
 end
 
-# waive B0013: `distinct` is a builtin rittai also uses, so the prefix stays; koubou::rittai::distinct names it too
+# waive B0013: `distinct` is a builtin rittai also uses, so the prefix stays; rigaku::koubou::rittai::distinct names it too
 def rt_distinct(keys, _table)
   reverse(reduce(distinct_step, {seen: {}, out: []}, keys)[:out])
 end

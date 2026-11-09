@@ -16,8 +16,17 @@ Written for nupastel docs/plans/design-pipeline.md, step 6.
 
 use("kazu", %i[abs max min mod_positive near sum])
 
+use("maakuappu")
+
+use("moji", %i[includes pad_left take_chars])
+
 use(
-  "koubou/kikagaku",
+  "retsu",
+  %i[concat_lists contains first flat_map indexes is_empty last size take_n]
+)
+
+use(
+  "rigaku/koubou/kikagaku",
   %i[
     bounding_box
     circle_polygon
@@ -31,16 +40,7 @@ use(
   ]
 )
 
-use("koubou/rittai")
-
-use("maakuappu")
-
-use("moji", %i[includes pad_left take_chars])
-
-use(
-  "retsu",
-  %i[concat_lists contains first flat_map indexes is_empty last size take_n]
-)
+use("rigaku/koubou/rittai")
 
 use("ronri", [:every])
 use("shuugou", [:as_set])
@@ -297,19 +297,19 @@ project: feature-edge view of a solid.
 """
 def project(p, view)
   if view == :top
-    [koubou::rittai::x(p), koubou::rittai::y(p)]
+    [rigaku::koubou::rittai::x(p), rigaku::koubou::rittai::y(p)]
   elsif view == :front
-    [koubou::rittai::x(p), koubou::rittai::z(p)]
+    [rigaku::koubou::rittai::x(p), rigaku::koubou::rittai::z(p)]
   else
-    [koubou::rittai::y(p), koubou::rittai::z(p)]
+    [rigaku::koubou::rittai::y(p), rigaku::koubou::rittai::z(p)]
   end
 end
 
 def view(mesh, view)
-  m = koubou::rittai::weld(mesh)
-  vs = koubou::rittai::vertices(m)
-  faces = koubou::rittai::faces(m)
-  normals = map((f) -> koubou::rittai::face_normal(m, f), faces)
+  m = rigaku::koubou::rittai::weld(mesh)
+  vs = rigaku::koubou::rittai::vertices(m)
+  faces = rigaku::koubou::rittai::faces(m)
+  normals = map((f) -> rigaku::koubou::rittai::face_normal(m, f), faces)
   table = reduce((acc, i) -> edge_faces(acc, faces[i], i), {}, indexes(faces))
   keys = distinct_keys(faces)
   drawn = filter((k) -> feature?(get(table, k), normals), keys)
@@ -351,7 +351,7 @@ def distinct_keys(faces)
 end
 
 def note_key(acc, k)
-  koubou::rittai::seen_step(acc, k, :keys)
+  rigaku::koubou::rittai::seen_step(acc, k, :keys)
 end
 
 def feature?(fs, normals)
@@ -419,10 +419,10 @@ def dxf(entities)
     [0, "ENDTAB"]
   ]
   layers = concat_lists(
-    [[0, "TABLE"], [2, "LAYER"], [70, size(koubou::zumen::layers)]],
+    [[0, "TABLE"], [2, "LAYER"], [70, size(rigaku::koubou::zumen::layers)]],
     concat_lists(
       flat_map(
-        koubou::zumen::layers,
+        rigaku::koubou::zumen::layers,
         (l) -> [[0, "LAYER"], [2, l[0]], [70, 0], [62, l[1]], [6, l[2]]]
       ),
       [[0, "ENDTAB"]]
@@ -575,7 +575,7 @@ end
 
 # ── tests ────────────────────────────────────────────────────────────
 
-# waive B0013: `count` is a builtin zumen also uses, so the prefix stays; koubou::zumen::count names it too
+# waive B0013: `count` is a builtin zumen also uses, so the prefix stays; rigaku::koubou::zumen::count names it too
 @doc """
 zu_count: How many (0, kind) pairs the DXF text holds: group code 0 starts a
 record, so this counts records of that kind and not the same word used as a
@@ -611,7 +611,7 @@ test "an empty drawing is still a whole DXF"
 end
 
 test "every entity is written once, of its own kind, on a declared layer"
-  plate = koubou::kikagaku::region(
+  plate = rigaku::koubou::kikagaku::region(
     rect_polygon(0, 0, 100, 50),
     [circle_polygon([25, 25], 5, 16)]
   )
@@ -657,7 +657,7 @@ test "SVG: y is flipped, the scale is 1:1 in mm, text is escaped"
 end
 
 test "a view of a box draws its twelve edges and no diagonals"
-  v = view(koubou::rittai::box(20, 30, 40), :front)
+  v = view(rigaku::koubou::rittai::box(20, 30, 40), :front)
   assert size(v) == 12
   assert every((e) -> layer(e) == "VIEW", v) == true
   bb = bounds(v)

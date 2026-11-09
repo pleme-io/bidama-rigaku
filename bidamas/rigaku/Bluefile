@@ -1,0 +1,25 @@
+package("rigaku", "0.1.2", :public)
+needs("deeta", "^0.1.0")
+needs("junjo", "^0.1.0")
+needs("kansuu", "^0.1.0")
+needs("kazu", "^0.1.0")
+needs("maakuappu", "^0.1.0")
+needs("moji", "^0.1.0")
+needs("retsu", "^0.1.0")
+needs("ronri", "^0.1.0")
+needs("shinsuu", "^0.1.0")
+needs("shuugou", "^0.1.0")
+needs("suugaku", "^0.1.0")
+legacy_packages(
+  "0.1.2",
+  [
+    ["angou", "rigaku/angou"],
+    ["ongaku", "rigaku/ongaku"],
+    ["seimei", "rigaku/seimei"],
+    ["koubou", "rigaku/koubou"],
+    ["kakou", "rigaku/koubou/kakou"],
+    ["kikagaku", "rigaku/koubou/kikagaku"],
+    ["rittai", "rigaku/koubou/rittai"],
+    ["zumen", "rigaku/koubou/zumen"]
+  ]
+)

@@ -1,18 +1,20 @@
 {
   "schema": 1,
-  "bluefile_b3": "b3:6d2477de3f02c2aa89b017bfd5d32df2778fd95ef7633c2be82b9c4934f2720c",
+  "bluefile_b3": "b3:75cb38c89c17a2392a0c03dea5f2d89f72371114405f29767ca79da7cf8fb9ef",
   "manifest": {
     "schema": 1,
-    "name": "koubou",
+    "name": "rigaku",
     "version": "0.1.2",
     "needs": {
       "deeta": "^0.1.0",
       "junjo": "^0.1.0",
+      "kansuu": "^0.1.0",
       "kazu": "^0.1.0",
       "maakuappu": "^0.1.0",
       "moji": "^0.1.0",
       "retsu": "^0.1.0",
       "ronri": "^0.1.0",
+      "shinsuu": "^0.1.0",
       "shuugou": "^0.1.0",
       "suugaku": "^0.1.0"
     },
@@ -24,22 +26,39 @@
     "checks": {},
     "apps": {},
     "catalog": null,
+    "visibility": "public",
     "legacy_packages": {
+      "angou": {
+        "since": "0.1.2",
+        "to": "rigaku/angou"
+      },
       "kakou": {
         "since": "0.1.2",
-        "to": "koubou/kakou"
+        "to": "rigaku/koubou/kakou"
       },
       "kikagaku": {
         "since": "0.1.2",
-        "to": "koubou/kikagaku"
+        "to": "rigaku/koubou/kikagaku"
+      },
+      "koubou": {
+        "since": "0.1.2",
+        "to": "rigaku/koubou"
+      },
+      "ongaku": {
+        "since": "0.1.2",
+        "to": "rigaku/ongaku"
       },
       "rittai": {
         "since": "0.1.2",
-        "to": "koubou/rittai"
+        "to": "rigaku/koubou/rittai"
+      },
+      "seimei": {
+        "since": "0.1.2",
+        "to": "rigaku/seimei"
       },
       "zumen": {
         "since": "0.1.2",
-        "to": "koubou/zumen"
+        "to": "rigaku/koubou/zumen"
       }
     }
   },
